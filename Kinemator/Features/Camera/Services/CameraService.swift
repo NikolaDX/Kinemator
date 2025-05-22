@@ -6,60 +6,132 @@
 //
 
 import AVFoundation
-import Foundation
+import Photos
+import UIKit
 
-class CameraService: NSObject, ObservableObject {
+enum CameraError: Error {
+    case addInputFailed
+    case addOutputFailed
+}
+
+class CameraService: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate, AVCapturePhotoCaptureDelegate {
     private let session = AVCaptureSession()
-    private let sessionQueue = DispatchQueue(label: "camera.session.queue")
+    private var videoOutput = AVCaptureMovieFileOutput()
+    private var photoOutput = AVCapturePhotoOutput()
+    private var previewLayer: AVCaptureVideoPreviewLayer?
     
-    @Published var isSessionRunning: Bool = false
-    
-    var previewLayer: AVCaptureVideoPreviewLayer?
+    @Published var isRecording = false
     
     override init() {
         super.init()
-        configureSession()
     }
-    
-    private func configureSession() {
+
+    func configureSession() {
         session.beginConfiguration()
-        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-              let input = try? AVCaptureDeviceInput(device: camera), session.canAddInput(input) else {
+        session.sessionPreset = .high
+        
+        // Input configuration
+        guard let device = AVCaptureDevice.default(for: .video),
+              let input = try? AVCaptureDeviceInput(device: device),
+              session.canAddInput(input) else {
+            print("Failed to add camera input")
             return
         }
-        
         session.addInput(input)
         
-        let photoOutput = AVCapturePhotoOutput()
+        
+        // Audio input configuration
+        if let audioDevice = AVCaptureDevice.default(for: .audio),
+           let audioInput = try? AVCaptureDeviceInput(device: audioDevice),
+           session.canAddInput(audioInput) {
+            session.addInput(audioInput)
+        } else {
+            print("Failed to add audio input")
+        }
+        
+        // Photo output configuration
         if session.canAddOutput(photoOutput) {
             session.addOutput(photoOutput)
         }
         
-        session.commitConfiguration()
+        // Video output configuration
+        if session.canAddOutput(videoOutput) {
+            session.addOutput(videoOutput)
+        }
         
-        previewLayer = AVCaptureVideoPreviewLayer(session: session)
-        previewLayer?.videoGravity = .resizeAspect
+        // Set landscape orientation
+        if let connection = previewLayer?.connection, connection.isVideoOrientationSupported {
+            connection.videoOrientation = .landscapeRight
+        }
+        
+        if let connection = videoOutput.connection(with: .video), connection.isVideoOrientationSupported {
+            connection.videoOrientation = .landscapeRight
+        }
+        
+        session.commitConfiguration()
     }
     
     func startSession() {
-        sessionQueue.async {
-            if !self.session.isRunning {
+        if !session.isRunning {
+            DispatchQueue.global(qos: .background).async {
                 self.session.startRunning()
-                DispatchQueue.main.async {
-                    self.isSessionRunning = true
-                }
             }
         }
     }
     
     func stopSession() {
-        sessionQueue.async {
-            if self.session.isRunning {
-                self.session.stopRunning()
-                DispatchQueue.main.async {
-                    self.isSessionRunning = false
+        if session.isRunning {
+            session.stopRunning()
+        }
+    }
+    
+    func startRecording(to url: URL) {
+        if !videoOutput.isRecording {
+            videoOutput.startRecording(to: url, recordingDelegate: self)
+            isRecording = true
+        }
+    }
+    
+    func stopRecording() {
+        if videoOutput.isRecording {
+            videoOutput.stopRecording()
+            isRecording = false
+        }
+    }
+    
+    func takePhoto() {
+        let settings = AVCapturePhotoSettings()
+        photoOutput.capturePhoto(with: settings, delegate: self)
+    }
+    
+    func getPreviewLayer() -> AVCaptureVideoPreviewLayer {
+        if previewLayer == nil {
+            previewLayer = AVCaptureVideoPreviewLayer(session: session)
+            previewLayer?.videoGravity = .resizeAspect
+        }
+        return previewLayer!
+    }
+    
+    func saveVideoToPhotoLibrary(from url: URL) {
+        PHPhotoLibrary.requestAuthorization { status in
+            guard status == .authorized || status == .limited else {
+                print("Photo library access denied.")
+                return
+            }
+            
+            PHPhotoLibrary.shared().performChanges({
+                PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
+            }) { success, error in
+                if let error = error {
+                    print("Failed to save video: \(error.localizedDescription)")
+                } else {
+                    print("Video saved to photo library successfully!")
                 }
             }
         }
+    }
+    
+    func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: (any Error)?) {
+        saveVideoToPhotoLibrary(from: outputFileURL)
     }
 }
